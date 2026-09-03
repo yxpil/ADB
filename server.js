@@ -25,8 +25,12 @@ const { URL } = require('url');
 const db = require('./lib/db');
 const { forward } = require('./lib/forward');
 const { serveUI } = require('./lib/ui');
+const vmcp = require('./lib/vmcp');
+const mockai = require('./lib/mockai');
+const virtual = require('./lib/virtual');
+const { analyzeRequest, analyzeResponseJson } = require('./lib/classify');
 
-const VERSION = 'v0.2.0';
+const VERSION = 'v0.3.0';
 const PORT = Number(process.env.PORT || 8987);
 db.open(process.env.ADB_DB);
 
@@ -86,6 +90,35 @@ const server = http.createServer((req, res) => {
       return json(res, { ok: true, uptime: process.uptime(), version: VERSION, token: process.env.ADB_INSTANCE_TOKEN || null });
     }
 
+    // ── 虚拟 MCP 服务器（BIT 把 MCP URL 填 http://127.0.0.1:<port>/mcp）──
+    if (p === '/mcp') {
+      return vmcp.handle(req, res, url, db.getConfig(), (status, resBody, started, reqText, extraTags) =>
+        recordVirtualRpc(req, url, status, resBody, started, reqText, extraTags));
+    }
+
+    // ── 虚拟 AI 场景端点（BIT 把 base_url 填 http://127.0.0.1:<port>/mock）──
+    if (p === '/mock' || p.startsWith('/mock/')) {
+      return mockai.handle(req, res, url, r => db.insertRequest(r));
+    }
+
+    // ── 待应答队列（人工扮演 AI / 人工应答 MCP 工具）──
+    if (p === '/api/pending') {
+      return json(res, { ai: virtual.list('ai'), mcp: virtual.list('mcp') });
+    }
+    const mRespond = p.match(/^\/api\/pending\/([A-Za-z0-9-]+)\/respond$/);
+    if (mRespond && req.method === 'POST') {
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        try {
+          const ok = virtual.respond(mRespond[1], JSON.parse(body || '{}'));
+          if (!ok) { res.writeHead(404); return res.end(JSON.stringify({ error: 'pending request not found (already answered or expired)' })); }
+          return json(res, { ok: true });
+        } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: e.message })); }
+      });
+      return;
+    }
+
     // ── 其余全部转发 ──
     return forward(req, res, url, db.getConfig(), r => db.insertRequest(r));
   } catch (e) {
@@ -100,6 +133,30 @@ function json(res, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// 虚拟 MCP JSON-RPC 入库（与转发记录同结构，tags 由 vmcp 提供）
+function recordVirtualRpc(req, url, status, resBody, started, reqText, extraTags) {
+  let reqJson = null;
+  try { reqJson = reqText ? JSON.parse(reqText) : null; } catch {}
+  const reqInfo = analyzeRequest(reqJson);
+  let respInfo = { categories: [], tools: [], toolCalls: [], usage: null, model: null };
+  if (resBody) { try { respInfo = analyzeResponseJson(JSON.parse(resBody)); } catch {} }
+  db.insertRequest({
+    ts: new Date(started || Date.now()).toISOString(), method: req.method, path: url.pathname,
+    target: 'virtual-mcp', status, duration_ms: Date.now() - (started || Date.now()),
+    req_size: Buffer.byteLength(reqText || ''), res_size: Buffer.byteLength(resBody || ''),
+    content_type: 'application/json', is_sse: 0, sse_events: 0, sse_ms: 0, aborted: 0,
+    model: reqInfo.model || respInfo.model, provider: 'virtual',
+    session_id: reqInfo.session_id, api_key_hint: null,
+    preview: reqText ? reqText.replace(/\s+/g, ' ').trim().slice(0, 120) : null,
+    req_headers: { ...req.headers }, res_headers: {},
+    req_body: reqText || null, res_body: resBody || null,
+    tags: [...new Set(['mcp', ...reqInfo.categories, ...respInfo.categories, ...(extraTags || [])])],
+    tools: [...new Set([...reqInfo.tools, ...respInfo.tools])],
+    tool_calls: [...reqInfo.toolCalls, ...respInfo.toolCalls],
+    usage: respInfo.usage, error: status >= 400 ? `status ${status}` : null,
+  });
+}
+
 server.on('error', (err) => {
   console.error(`[adb] 启动失败: ${err.message}`);
   process.exit(1);
@@ -109,5 +166,6 @@ server.listen(PORT, () => {
   console.log(`ADB — Agent Debug Bridge ${VERSION}`);
   console.log(`  面板:   http://127.0.0.1:${PORT}`);
   console.log(`  转发:   x-adb-target: <url|预设名>  /  /forward/<host>/...  /  面板设置默认目标`);
+  console.log(`  虚拟:   /mcp 虚拟MCP · /manual 人工扮演AI · /mock/* E2E场景 · 面板「虚拟」页`);
   console.log(`  存储:   SQLite (data/adb.db)，WAL 模式，全量不截断`);
 });

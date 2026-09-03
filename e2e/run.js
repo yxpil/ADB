@@ -361,6 +361,167 @@ async function waitHealth() {
       record('S21 关闭后恢复透传', JSON.parse(r5.buf.toString()).body.messages.length === 1);
     }
 
+    // ── S22 虚拟 MCP 服务器（BIT 兼容：握手/会话/工具/人工应答）──
+    {
+      // 握手：BIT 要求 result.protocolVersion/capabilities/serverInfo + Mcp-Session-Id 头
+      const init = await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'bit', version: '1.0' } } } });
+      const initBody = JSON.parse(init.buf.toString());
+      record('S22 initialize 握手 + Mcp-Session-Id', init.code === 200 && !!init.headers['mcp-session-id']
+        && !!initBody.result?.protocolVersion && !!initBody.result?.serverInfo?.name, JSON.stringify(initBody).slice(0, 80));
+      const SID = init.headers['mcp-session-id'];
+
+      const notify = await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json', 'mcp-session-id': SID }, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+      record('S22 initialized 通知 202', notify.code === 202 && notify.buf.length === 0, `code=${notify.code}`);
+
+      const tl = await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json', 'mcp-session-id': SID }, body: { jsonrpc: '2.0', id: 2, method: 'tools/list' } });
+      const tools = JSON.parse(tl.buf.toString()).result?.tools || [];
+      record('S22 tools/list 内置工具', tools.some(t => t.name === 'echo') && tools.some(t => t.name === 'add') && tools.some(t => t.name === 'now'),
+        tools.map(t => t.name).join(','));
+
+      const ec = await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'echo', arguments: { message: 'bit-e2e' } } } });
+      const echoText = JSON.parse(ec.buf.toString()).result?.content?.[0]?.text;
+      record('S22 tools/call echo', echoText === 'ECHO<bit-e2e>', `got=${echoText}`);
+
+      const ac = await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'add', arguments: { a: 1.5, b: 2 } } } });
+      record('S22 tools/call add', JSON.parse(ac.buf.toString()).result?.content?.[0]?.text === 'SUM=3.5');
+
+      const uf = await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'nope', arguments: {} } } });
+      record('S22 未知工具 isError', JSON.parse(uf.buf.toString()).result?.isError === true);
+
+      // 自定义工具：fixed + manual
+      await req(ADB_PORT, 'POST', '/api/config', { body: { vmcp_tools: [
+        { name: 'get_weather', description: 'fixed weather', mode: 'fixed', result: 'SUNNY 25C' },
+        { name: 'report_issue', description: 'manual report', mode: 'manual' },
+      ] } });
+      const tl2 = JSON.parse((await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 6, method: 'tools/list' } })).buf.toString());
+      record('S22 自定义工具出现在 tools/list', tl2.result.tools.some(t => t.name === 'get_weather') && tl2.result.tools.some(t => t.name === 'report_issue'));
+
+      const fc = JSON.parse((await req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'get_weather', arguments: {} } } })).buf.toString());
+      record('S22 fixed 工具固定结果', fc.result?.content?.[0]?.text === 'SUNNY 25C' && fc.result?.isError === false);
+
+      // manual：挂起 → 面板应答 → 写回 JSON-RPC
+      const manualP = req(ADB_PORT, 'POST', '/mcp',
+        { headers: { 'content-type': 'application/json' }, body: { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'report_issue', arguments: { title: 'E2E-BUG' } } } });
+      await sleep(400);
+      let pend = await getJSON('/api/pending');
+      const mp = pend.mcp.find(p => p.tool_name === 'report_issue');
+      record('S22 manual 工具挂起可见', !!mp && JSON.stringify(mp.tool_args || mp.preview || '').includes('E2E-BUG'), JSON.stringify(pend.mcp));
+      const rp = await req(ADB_PORT, 'POST', '/api/pending/' + mp.id + '/respond',
+        { body: { text: 'ISSUE-RECORDED', is_error: false } });
+      const manualRes = JSON.parse((await manualP).buf.toString());
+      record('S22 面板应答写回 JSON-RPC', rp.code === 200 && manualRes.result?.content?.[0]?.text === 'ISSUE-RECORDED', JSON.stringify(manualRes).slice(0, 100));
+      const again = await req(ADB_PORT, 'POST', '/api/pending/' + mp.id + '/respond', { body: { text: 'x' } });
+      record('S22 重复应答 404', again.code === 404);
+
+      // 记录入库：mcp tags
+      await sleep(300);
+      const mcpRecs = await getJSON('/api/records?limit=50&tag=mcp');
+      record('S22 JSON-RPC 全量入库(mcp 标签)', mcpRecs.length >= 6, `n=${mcpRecs.length}`);
+      record('S22 tools/call 记录带 tool 标签', mcpRecs.some(r => (r.tags || []).includes('tool:report_issue') && r.target === 'virtual-mcp'));
+      await req(ADB_PORT, 'POST', '/api/config', { body: { vmcp_tools: [] } });
+    }
+
+    // ── S23 虚拟 AI（人工扮演上游：manual 头/路径、流式、错误、raw）──
+    {
+      // 非流式（路径式，BIT base_url=http://127.0.0.1:port/manual → /manual/chat/completions）
+      const p1 = req(ADB_PORT, 'POST', '/manual/chat/completions',
+        { headers: { 'content-type': 'application/json' }, body: { model: 'manual-x', messages: [{ role: 'user', content: 'E2E-MANUAL-1' }] } });
+      await sleep(400);
+      let pend = await getJSON('/api/pending');
+      const ai1 = pend.ai[0];
+      record('S23 路径式挂起 + 预览/模型', !!ai1 && ai1.model === 'manual-x' && (ai1.preview || '').includes('E2E-MANUAL-1'), JSON.stringify(pend.ai).slice(0, 120));
+      await req(ADB_PORT, 'POST', '/api/pending/' + ai1.id + '/respond', { body: { mode: 'auto', text: '人工回复一号' } });
+      const r1 = JSON.parse((await p1).buf.toString());
+      record('S23 自动包装整包 chat.completion', r1.object === 'chat.completion' && r1.choices?.[0]?.message?.content === '人工回复一号'
+        && r1.usage?.total_tokens > 0, JSON.stringify(r1).slice(0, 100));
+
+      // 流式（头式 x-adb-target: manual）
+      const p2 = req(ADB_PORT, 'POST', '/v1/chat/completions',
+        { headers: { 'x-adb-target': 'manual', 'content-type': 'application/json' }, body: { model: 'manual-x', stream: true, messages: [{ role: 'user', content: 'E2E-MANUAL-2' }] } });
+      await sleep(400);
+      pend = await getJSON('/api/pending');
+      record('S23 头式挂起 + stream 标记', pend.ai[0]?.stream === true);
+      await req(ADB_PORT, 'POST', '/api/pending/' + pend.ai[0].id + '/respond', { body: { mode: 'auto', text: '流式人工回复AB', chunk_ms: 5 } });
+      const r2raw = (await p2).buf.toString();
+      record('S23 流式 SSE delta + [DONE]', r2raw.startsWith('data: {') && r2raw.includes('"delta":{"content":"流式人工回复AB"}')
+        && r2raw.trimEnd().endsWith('data: [DONE]'), r2raw.slice(0, 80));
+
+      // 错误模式
+      const p3 = req(ADB_PORT, 'POST', '/v1/chat/completions', { headers: { 'x-adb-target': 'manual' }, body: { messages: [] } });
+      await sleep(400);
+      pend = await getJSON('/api/pending');
+      await req(ADB_PORT, 'POST', '/api/pending/' + pend.ai[0].id + '/respond', { body: { mode: 'error', message: 'E2E-MANUAL-ERR' } });
+      const r3 = JSON.parse((await p3).buf.toString());
+      record('S23 错误模式 500 + error 结构', r3.error?.message === 'E2E-MANUAL-ERR');
+
+      // raw 模式（任意 JSON，Claude/Gemini 协议兜底）
+      const p4 = req(ADB_PORT, 'POST', '/manual/v1/messages', { body: { model: 'claude-fake', messages: [] } });
+      await sleep(400);
+      pend = await getJSON('/api/pending');
+      await req(ADB_PORT, 'POST', '/api/pending/' + pend.ai[0].id + '/respond',
+        { body: { mode: 'raw', body: { id: 'msg_raw', content: [{ type: 'text', text: 'RAW-OK' }] } } });
+      const r4 = JSON.parse((await p4).buf.toString());
+      record('S23 raw 模式原样返回', r4.id === 'msg_raw' && r4.content?.[0]?.text === 'RAW-OK');
+
+      // 客户端提前断开：不悬挂、入库 aborted
+      await new Promise((resolve) => {
+        const r = http.request({ host: '127.0.0.1', port: ADB_PORT, path: '/manual/chat/completions', method: 'POST',
+          headers: { 'content-length': 2 } }, () => {});
+        r.on('error', () => {});   // 预期 ECONNRESET：客户端主动断开
+        r.write('{}'); r.end(); setTimeout(() => { r.destroy(); resolve(); }, 150);
+      });
+      await sleep(400);
+      record('S23 客户端断开出队', ((await getJSON('/api/pending')).ai.length === 0));
+
+      // 入库断言
+      const vrecs = await getJSON('/api/records?limit=20&tag=virtual');
+      record('S23 虚拟 AI 记录入库', vrecs.length >= 3 && vrecs.every(r => r.target === 'manual' && r.provider === 'virtual'), `n=${vrecs.length}`);
+      const sseRec = vrecs.find(r => r.is_sse === 1);
+      record('S23 流式记录 SSE 计数与 usage', !!sseRec && sseRec.sse_events >= 3 && !!sseRec.usage, `events=${sseRec?.sse_events}`);
+      const errRec = vrecs.find(r => r.status === 500);
+      record('S23 错误记录标记 error', !!errRec && (errRec.tags || []).includes('error'));
+      const abortRec = vrecs.find(r => r.aborted === 1);
+      record('S23 断开记录标记 aborted', !!abortRec);
+    }
+
+    // ── S24 虚拟 E2E 场景端点（/mock/*，BIT base_url 兼容）──
+    {
+      const c1 = JSON.parse((await req(ADB_PORT, 'POST', '/mock/chat/completions',
+        { headers: { 'content-type': 'application/json' }, body: { model: 'mock-m', messages: [{ role: 'user', content: 'E2E-MOCK' }] } })).buf.toString());
+      record('S24 mock 正常对话（BIT 路径拼接）', c1.object === 'chat.completion' && c1.choices?.[0]?.message?.content.includes('E2E-MOCK') && c1.usage?.total_tokens > 0);
+
+      const s1raw = (await req(ADB_PORT, 'POST', '/mock/stream?events=5', { body: {} })).buf.toString();
+      record('S24 mock 流式事件完整', s1raw.split('data:').length - 1 === 7 && s1raw.trimEnd().endsWith('data: [DONE]'), `n=${s1raw.split('data:').length - 1}`);
+
+      const tc = JSON.parse((await req(ADB_PORT, 'POST', '/mock/toolcall?name=shell', { body: {} })).buf.toString());
+      record('S24 mock 工具调用结构', tc.choices?.[0]?.finish_reason === 'tool_calls' && tc.choices?.[0]?.message?.tool_calls?.[0]?.function?.name === 'shell');
+
+      const f1 = await req(ADB_PORT, 'POST', '/mock/fail', { body: {} });
+      record('S24 mock 500', f1.code === 500 && !!JSON.parse(f1.buf.toString()).error?.message);
+
+      const ec2 = JSON.parse((await req(ADB_PORT, 'POST', '/mock/echo?probe=1',
+        { headers: { 'content-type': 'application/json', authorization: 'Bearer sk-e2e-9999' }, body: { marker: 'ECHO-MARK' } })).buf.toString());
+      record('S24 mock 回显请求体', ec2.body?.marker === 'ECHO-MARK' && ec2.authorization === 'Bearer sk-e2e-9999');
+
+      const unk = await req(ADB_PORT, 'POST', '/mock/nothing', { body: {} });
+      record('S24 mock 未知场景 404', unk.code === 404);
+
+      await sleep(300);
+      const mrecs = await getJSON('/api/records?limit=20&tag=mock');
+      record('S24 mock 记录入库', mrecs.length >= 5 && mrecs.every(r => r.target === 'mock'), `n=${mrecs.length}`);
+      const mockSse = mrecs.find(r => r.is_sse === 1);
+      record('S24 mock 流式记录事件计数', !!mockSse && mockSse.sse_events === 7, `events=${mockSse?.sse_events}`);
+      record('S24 mock 500 记录 error 标签', mrecs.some(r => r.status === 500 && (r.tags || []).includes('error')));
+    }
+
     // ── S20 压力后完整性 ──
     {
       const h = await getJSON('/api/health');
