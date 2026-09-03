@@ -190,6 +190,40 @@ npm run e2e
 
 仅用 Node.js 内置模块，无需安装任何依赖。
 
+## 数据与隐私
+
+ADB 是纯本机工具，设计目标是"你的数据不出你的机器"：
+
+- **存储**：所有记录写入本地 SQLite（默认 `data/adb.db`，WAL 模式）。只有你主动 `GET /api/export` 或拷贝 db 文件，数据才会离开机器。
+- **密钥保护**：请求头里的 `authorization` 等凭据会随请求原样转发给上游（否则无法工作），但入库时**只保留脱敏提示** `api_key_hint`（如 `sk-abc…` 前 6 位 + 长度），完整密钥不落盘。ADB 面板与 API 都拿不到完整密钥。
+- **不共享**：无遥测、无崩溃上报、无账号体系；ADB 不会向你未配置的上游之外的任何地址发数据（唯一外联是你自己填的转发目标与 `dns` 解析）。
+- **安全边界**：ADB 默认监听 `127.0.0.1`，仅本机可访问；不要把 8987 端口暴露到公网（面板可清空/导出全部记录，且转发无认证）。如需远程使用，请前置带认证的反向代理。
+
+## 二次开发
+
+零依赖意味着克隆即可改。目录结构：
+
+```
+server.js            入口：路由分发（面板/API/虚拟端点/转发）
+lib/forward.js       转发核心：流式转发 + spool 落盘 + 全量记录 + 虚拟 AI（manual）
+lib/classify.js      自动分类：工具名/markdown 特征/角色/错误 提取
+lib/db.js            SQLite：schema、记录读写、配置（预设/注入/虚拟 MCP 工具）
+lib/virtual.js       人工应答基础设施：挂起队列（超时兜底/断开回调）
+lib/vmcp.js          虚拟 MCP 服务器（JSON-RPC 2.0）
+lib/mockai.js        虚拟 E2E 场景端点（/mock/*）
+lib/ui.js            面板（单文件 HTML/JS/CSS，黑白药丸风格）
+e2e/run.js           E2E：93 项断言（含假上游 e2e/fake-upstream.js）
+```
+
+常见改动入口：
+
+- **加一个 mock 场景**：在 `lib/mockai.js` 加一个 `scene === 'xxx'` 分支（响应后调 `finish()` 入库），再在 E2E 的 S24 组补断言。
+- **加一种应答模式**：在 `lib/forward.js` 的 `virtualAi/write` 里扩展 `answer.mode` 分支（auto/raw/error 之外），面板在 `lib/ui.js` 的 `renderPending` 加对应表单。
+- **加面板页**：`lib/ui.js` 里 tabs 数组加 id、加 `<div id="xxx" class="tab">`、写 `loadXxx()` 并挂到 tab 切换。
+- **改记录字段**：先改 `lib/db.js` 的建表与 `insertRequest`，再同步 `forward.js` / `server.js`（recordVirtualRpc）与 `mockai.js` 三处组装点。
+
+约定：安全相关行为（api_key_hint 脱敏、aborted 标记、超时兜底）改动必须带 E2E 断言；E2E 跑三连轮再提交。
+
 ## License
 
 Apache-2.0
