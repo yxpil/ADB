@@ -48,17 +48,20 @@ function req(port, method, p, { headers = {}, body, expectBody = true, onChunk }
 }
 const getJSON = (p) => req(ADB_PORT, 'GET', p).then(r => JSON.parse(r.buf.toString()));
 
+const ADB_PROCS = [];
 function startADB(dbFile) {
   const proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, PORT: String(ADB_PORT), ADB_DB: dbFile, ADB_INSTANCE_TOKEN: INSTANCE_TOKEN },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
+  ADB_PROCS.push(proc);
   let errTail = '';
   proc.stderr.on('data', d => { errTail = (errTail + d).slice(-600); });
   proc.errTail = () => errTail;
   return proc;
 }
+process.on('exit', () => { for (const p of ADB_PROCS) { try { p.kill(); } catch {} } });
 // 必须确认响应来自本轮启动的实例（防止旧进程占端口导致测试打在旧代码上）
 async function waitHealth() {
   for (let i = 0; i < 40; i++) {
@@ -319,6 +322,43 @@ async function waitHealth() {
       const hugeRecs = (await getJSON('/api/records?limit=30')).filter(r => r.path.includes('stream-huge') && r.sse_events === 2002);
       record('S19 长流事件计数精确', hugeRecs.length >= 10, `got=${hugeRecs.length}`);
       record('S19 长流后记录总数一致', s2.total === N + 10, `total=${s2.total}`);
+    }
+
+    // ── S21 注入系统指令（AI 主动发消息调试入口）──
+    {
+      await req(ADB_PORT, 'POST', '/api/config', { body: { inject_system: true } });
+      const H = { 'x-adb-target': FAKE };
+      const msgs = () => ({ model: 'inject-test', messages: [{ role: 'user', content: 'hi' }] });
+
+      const r1 = await req(ADB_PORT, 'POST', '/v1/echo', { headers: H, body: msgs() });
+      const m1 = JSON.parse(r1.buf.toString()).body.messages;
+      record('S21 全局开启：末尾注入默认 system 指令', m1.length === 2 && m1[1].role === 'system'
+        && m1[1].content === '你现在可以主动发送一条信息', JSON.stringify(m1 ? m1[1] : null));
+
+      const r2 = await req(ADB_PORT, 'POST', '/v1/echo',
+        { headers: { ...H, 'x-adb-inject': 'ADB-CUSTOM-INJECT' }, body: msgs() });
+      const m2 = JSON.parse(r2.buf.toString()).body.messages;
+      record('S21 头覆盖：自定义注入文本', m2.length === 2 && m2[1].content === 'ADB-CUSTOM-INJECT');
+      record('S21 x-adb-inject 头不透传上游', JSON.parse(r2.buf.toString()).inject_header === null);
+
+      const r3 = await req(ADB_PORT, 'POST', '/v1/echo',
+        { headers: { ...H, 'x-adb-inject': 'off' }, body: msgs() });
+      record('S21 头 off：强制不注入', JSON.parse(r3.buf.toString()).body.messages.length === 1);
+
+      const r4 = await req(ADB_PORT, 'POST', '/v1/echo', { headers: H, body: { ping: 1 } });
+      record('S21 非 messages 请求不注入', JSON.parse(r4.buf.toString()).body.ping === 1);
+
+      const inj = (await getJSON('/api/records?limit=10&tag=injected'))[0];
+      const dInj = await getJSON('/api/record/' + inj.id);
+      record('S21 injected 标签 + 实际转发体入库', (inj.tags || []).includes('injected')
+        && JSON.parse(dInj.req_body).messages.length === 2
+        && JSON.parse(dInj.req_body).messages[1].content === 'ADB-CUSTOM-INJECT');
+      record('S21 x-adb-inject 头不透传上游', JSON.parse(r2.buf.toString()).inject_header === null);
+      record('S21 preview 保持原始请求（注入前）', inj.preview === 'hi', `got=${inj.preview}`);
+
+      await req(ADB_PORT, 'POST', '/api/config', { body: { inject_system: false } });
+      const r5 = await req(ADB_PORT, 'POST', '/v1/echo', { headers: H, body: msgs() });
+      record('S21 关闭后恢复透传', JSON.parse(r5.buf.toString()).body.messages.length === 1);
     }
 
     // ── S20 压力后完整性 ──

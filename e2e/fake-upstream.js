@@ -130,7 +130,8 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({
         body: body, auth: req.headers['authorization'] || null,
         accept_encoding: req.headers['accept-encoding'] || null,
-        custom: req.headers['x-adb-custom'] || null, size: bodyText.length,
+        custom: req.headers['x-adb-custom'] || null,
+        inject_header: req.headers['x-adb-inject'] || null, size: bodyText.length,
       }));
     }
 

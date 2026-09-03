@@ -52,6 +52,17 @@ POST http://127.0.0.1:8987/forward/127.0.0.1:11434/v1/chat/completions
 
 **方式三：默认目标**——面板「设置」里填默认目标，不带 `x-adb-target` 的请求全部转发过去。
 
+## AI 主动发消息（注入系统指令）
+
+调试 Agent（如 BIT）的主动行为：开启后，ADB 会在转发请求的 `messages` 末尾追加一条
+system 指令（默认「你现在可以主动发送一条信息」，文本可随意编辑），让模型在会话中
+主动发消息、处理系统事件，从而观察 Agent 侧如何响应。
+
+- 面板「设置」→「AI 主动发消息」：开关 + 指令文本
+- API：`POST /api/config`，body `{"inject_system": true, "inject_text": "你现在可以主动发送一条信息"}`
+- 单次请求覆盖：请求头 `x-adb-inject: <自定义文本>`；`x-adb-inject: off` 强制关闭（该头不会透传上游）
+- 仅对含 `messages` 数组的 JSON 请求生效；被注入的请求打 `injected` 标签，入库的是实际发往上游的请求体
+
 ## 自动分类
 
 面板顶部是分类标签，点击过滤。规则：

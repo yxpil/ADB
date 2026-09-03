@@ -13,6 +13,10 @@
  *   2. 路径前缀 /forward/api.example.com/v1/chat/completions
  *   3. 面板「设置」里配置默认目标，不带头的请求全部转发
  *
+ * 调试入口:
+ *   x-adb-inject: <文本|off>   向 messages 末尾注入一条 system 指令（让 AI 主动发消息），
+ *                              off 强制关闭；全局开关与默认文本在面板「设置」里配置
+ *
  * 面板: http://127.0.0.1:8987
  */
 'use strict';
