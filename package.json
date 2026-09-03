@@ -1,14 +1,23 @@
 {
   "name": "adb-agent-debug-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "ADB — Agent Debug Bridge. Zero-dependency AI API debugging proxy: forward, fully record (SQLite), SSE-safe, session analytics.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "e2e": "node e2e/run.js"
+    "unit": "node test/unit.js",
+    "e2e": "node e2e/run.js",
+    "test": "npm run unit && npm run e2e"
   },
-  "bin": { "adb": "server.js" },
-  "engines": { "node": ">=22.5.0" },
+  "bin": {
+    "adb": "server.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/yxpil/ADB.git" }
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yxpil/ADB.git"
+  }
 }

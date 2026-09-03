@@ -28,9 +28,10 @@ const { serveUI } = require('./lib/ui');
 const vmcp = require('./lib/vmcp');
 const mockai = require('./lib/mockai');
 const virtual = require('./lib/virtual');
+const bit = require('./lib/bit');
 const { analyzeRequest, analyzeResponseJson } = require('./lib/classify');
 
-const VERSION = 'v0.3.0';
+const VERSION = 'v0.4.0';
 const PORT = Number(process.env.PORT || 8987);
 db.open(process.env.ADB_DB);
 
@@ -117,6 +118,12 @@ const server = http.createServer((req, res) => {
         } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: e.message })); }
       });
       return;
+    }
+
+    // ── BIT 联动（控制与观测 BIT：chat / tool / state / sessions / mcp / audit）──
+    if (p.startsWith('/api/bit/')) {
+      // 凭据走内部专用读取（/api/config 只回传脱敏提示）
+      return bit.handle(req, res, url, { ...db.getConfig(), ...db.getBitCredentials() }, r => db.insertRequest(r));
     }
 
     // ── 其余全部转发 ──

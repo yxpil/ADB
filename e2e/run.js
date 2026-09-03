@@ -14,11 +14,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const fake = require('./fake-upstream');
+const fakeBit = require('./fake-bit');
 const { expectedSseText } = require('./stream-gen');
 
 const ADB_PORT = 8989;
 const ADB = `http://127.0.0.1:${ADB_PORT}`;
 const FAKE = `http://127.0.0.1:${fake.PORT}`;
+const FAKE_BIT = `http://127.0.0.1:${fakeBit.PORT}`;
 const INSTANCE_TOKEN = 'e2e-' + Math.random().toString(36).slice(2);
 const results = [];
 let failures = 0;
@@ -85,6 +87,7 @@ async function waitHealth() {
   const adb = startADB(dbFile);
   if (!await waitHealth()) { console.error('ADB 启动失败', adb.errTail()); process.exit(1); }
   await new Promise(r => fake.server.listen(fake.PORT, r));
+  await new Promise(r => fakeBit.server.listen(fakeBit.PORT, r));
 
   // ── S1 面板与健康检查 ──
   {
@@ -522,6 +525,83 @@ async function waitHealth() {
       record('S24 mock 500 记录 error 标签', mrecs.some(r => r.status === 500 && (r.tags || []).includes('error')));
     }
 
+    // ── S25 BIT 联动（控制与观测 BIT：state / tools / sessions / chat / tool invoke / 认证边界）──
+    {
+      // 未配置 BIT 地址 → 400
+      const noCfg = await req(ADB_PORT, 'GET', '/api/bit/state');
+      record('S25 未配置 BIT 返回 400', noCfg.code === 400 && !!JSON.parse(noCfg.buf.toString()).error, `code=${noCfg.code}`);
+
+      // 非法协议 → 400
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_url: 'ftp://127.0.0.1', bit_key: 'k' } });
+      const badProto = await req(ADB_PORT, 'GET', '/api/bit/state');
+      record('S25 非 http(s) BIT 地址拒绝', badProto.code === 400, `code=${badProto.code}`);
+
+      // 配置 fake BIT（双凭据）
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_url: FAKE_BIT, bit_key: fakeBit.CLIENT_KEY, bit_pwd: fakeBit.PASSWORD } });
+      const cfgText = JSON.stringify(await getJSON('/api/config'));
+      record('S25 Client Key 脱敏不回传', !cfgText.includes(fakeBit.CLIENT_KEY) && !!JSON.parse(cfgText).bit_key_hint, JSON.parse(cfgText).bit_key_hint);
+
+      record('S25 health 代理', (await getJSON('/api/bit/health')).ok === true);
+
+      const st = await getJSON('/api/bit/state');
+      record('S25 state 快照字段', st.version === '0.5.0-e2e' && st.provider?.name === 'e2e-provider'
+        && st.tools?.count === 3 && st.sessions?.count === 2 && st.memories === 4, JSON.stringify(st).slice(0, 100));
+      record('S25 state 密钥已脱敏', typeof st.provider?.api_key_hint === 'string' && st.provider.api_key_hint.includes('…') && !String(st.provider.api_key || '').includes('sk_e2e_real'));
+
+      const tools = await getJSON('/api/bit/tools');
+      record('S25 工具注册表代理', Array.isArray(tools.tools) && tools.tools.some(t => t.name === 'shell'));
+      const mcp = await getJSON('/api/bit/mcp');
+      record('S25 MCP 列表代理', mcp.servers?.[0]?.tools?.includes('echo') === true);
+      const audit = await getJSON('/api/bit/audit');
+      record('S25 审计日志代理', Array.isArray(audit.entries) && audit.entries.length >= 1);
+      const sessions = await getJSON('/api/bit/sessions');
+      record('S25 会话列表代理', sessions.sessions?.length === 2 && sessions.active === 's-1');
+      const detail = await getJSON('/api/bit/sessions/s-1');
+      record('S25 会话详情（含 tool_calls）', detail.messages?.[0]?.content === 'E2E-BIT-Q1'
+        && !!detail.messages?.[1]?.tool_calls, JSON.stringify(detail).slice(0, 80));
+      record('S25 未知会话 404 透传', (await req(ADB_PORT, 'GET', '/api/bit/sessions/ghost')).code === 404);
+
+      // 控制：驱动 BIT 跑一轮 Agent
+      const chat = await req(ADB_PORT, 'POST', '/api/bit/chat', { body: { message: 'E2E-BIT-CHAT-1', session_id: 's-1' } });
+      const chatBody = JSON.parse(chat.buf.toString());
+      record('S25 chat 驱动 BIT', chat.code === 200 && chatBody.reply === 'BIT-REPLY<E2E-BIT-CHAT-1>' && chatBody.session_id === 's-1', JSON.stringify(chatBody).slice(0, 80));
+      await sleep(300);
+      const bitRecs = await getJSON('/api/records?limit=10&tag=bit');
+      const chatRec = bitRecs.find(r => r.path === '/api/bit/chat');
+      const chatDetail = chatRec ? await getJSON('/api/record/' + chatRec.id) : null;
+      record('S25 chat 动作入库（bit 标签）', !!chatRec && (chatRec.tags || []).includes('bit:chat') && chatRec.target === 'bit'
+        && (chatDetail?.req_body || '').includes('E2E-BIT-CHAT-1'), JSON.stringify(chatRec?.tags));
+
+      // 控制：直接调用 BIT 工具
+      const tool = await req(ADB_PORT, 'POST', '/api/bit/tool/shell', { body: { args: { command: 'echo e2e' } } });
+      record('S25 工具直调', tool.code === 200 && JSON.parse(tool.buf.toString()).result === 'TOOL-OK<{"command":"echo e2e"}>', tool.buf.toString().slice(0, 80));
+      record('S25 未知工具 404 透传', (await req(ADB_PORT, 'POST', '/api/bit/tool/ghost', { body: {} })).code === 404);
+      record('S25 chat 缺 message 400', (await req(ADB_PORT, 'POST', '/api/bit/chat', { body: {} })).code === 400);
+      const toolRec = (await getJSON('/api/records?limit=10&tag=bit')).find(r => r.path === '/api/bit/tool/shell');
+      record('S25 tool 动作入库（bit:tool 标签）', !!toolRec && (toolRec.tags || []).includes('bit:tool') && toolRec.status === 200);
+
+      // 认证边界：错 Key → 401（BIT 原样透传）
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_key: 'wrong-key' } });
+      const wrongKey = await req(ADB_PORT, 'GET', '/api/bit/state');
+      record('S25 错误 Client Key → 401 透传', wrongKey.code === 401, `code=${wrongKey.code}`);
+      // 缺访问密码 → 401
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_key: fakeBit.CLIENT_KEY, bit_pwd: '' } });
+      const noPwd = await req(ADB_PORT, 'GET', '/api/bit/state');
+      record('S25 缺访问密码 → 401', noPwd.code === 401, `code=${noPwd.code}`);
+      // 恢复凭据后可达
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_pwd: fakeBit.PASSWORD } });
+      record('S25 恢复凭据后可用', (await getJSON('/api/bit/state')).version === '0.5.0-e2e');
+
+      // BIT 不可达 → 502
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_url: 'http://127.0.0.1:59996' } });
+      const unreach = await req(ADB_PORT, 'GET', '/api/bit/state');
+      record('S25 BIT 不可达 → 502', unreach.code === 502 && !!JSON.parse(unreach.buf.toString()).error, `code=${unreach.code}`);
+
+      // 清理 BIT 配置（不影响其它断言组 / 复跑）
+      await req(ADB_PORT, 'POST', '/api/config', { body: { bit_url: '', bit_key: '', bit_pwd: '' } });
+      record('S25 清空配置后回到 400', (await req(ADB_PORT, 'GET', '/api/bit/state')).code === 400);
+    }
+
     // ── S20 压力后完整性 ──
     {
       const h = await getJSON('/api/health');
@@ -534,5 +614,6 @@ async function waitHealth() {
   const pass = results.filter(r => r.ok).length;
   console.log(`\n==== ${pass}/${results.length} passed ====`);
   fake.server.close();
+  fakeBit.server.close();
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error('E2E runner error:', e); process.exit(1); });

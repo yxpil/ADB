@@ -36,6 +36,7 @@ ADB_DB=./my.db node server.js   # 自定义 SQLite 路径（默认 data/adb.db�
 | **会话** | 按 session_id 分组：笔数、token 用量、错误数、SSE 流数，快速定位一轮完整对话 |
 | **统计** | 总量/错误率/耗时/token 聚合，按模型 / 目标 / 工具 / 日期分组 |
 | **虚拟** | 调试 BIT 专属：待应答队列（人工扮演 AI / 人工应答 MCP 工具）、虚拟 MCP 自定义工具编辑、BIT 接入指引 |
+| **BIT** | 联动控制 BIT：连接配置（地址 / Client Key / 访问密码）、运行快照、工具注册表、MCP 服务器、会话浏览、审计日志，可直接发送对话与调用工具 |
 | **设置** | 默认转发目标、预设名列表、AI 主动发消息（注入系统指令）开关与文本、清空记录 |
 
 ## 调试 BIT（三种玩法）
@@ -116,6 +117,43 @@ curl -X POST http://127.0.0.1:8987/api/pending/<id>/respond \
 ```
 
 挂起默认 5 分钟超时（`ADB_VIRTUAL_TIMEOUT` 环境变量可调），超时/客户端断开都会完整入库，不悬挂。
+
+## 联动控制 BIT（BIT 联动）
+
+前面的「虚拟」系列是**扮演** AI/MCP；BIT 联动则是**直接控制与分析** BIT 本体——
+ADB 面板新增「BIT」页，填好凭据即可把 BIT 当作被调试对象。
+
+**BIT 侧要求**：版本 ≥ 0.5.0，且「设置 → 远程访问」已开启（配置 Client Key 与访问密码）。
+BIT 0.5.0 起提供 `/api/debug/*` 只读快照接口，与 `/api/chat`、`/api/tools/:id/invoke`
+共用同一套双重认证（Bearer Client Key + `X-Access-Password`）。
+
+**ADB 侧配置**：面板「BIT」页填 BIT 地址（如 `http://127.0.0.1:9921`）、Client Key、访问密码。
+
+**分析（只读）**：
+
+| ADB 端点 | 代理到 BIT | 内容 |
+|---|---|---|
+| `GET /api/bit/state` | `/api/debug/state` | 运行快照：版本、激活 Provider（**API Key 脱敏**）、工具数、MCP、会话/记忆/技能计数 |
+| `GET /api/bit/tools` | `/api/tools` | 工具注册表 |
+| `GET /api/bit/mcp` | `/api/debug/mcp` | MCP 服务器连接状态 + 各服务器导入的工具名 |
+| `GET /api/bit/sessions` | `/api/debug/sessions` | 会话列表（条数与摘要） |
+| `GET /api/bit/sessions/:id` | `/api/debug/sessions/:id` | 单会话全部消息（含 tool_calls 明细），未知 id 透传 404 |
+| `GET /api/bit/audit` | `/api/audit` | BIT 审计日志 |
+
+**控制**：
+
+| ADB 端点 | 作用 |
+|---|---|
+| `POST /api/bit/chat` | 驱动 BIT 跑一轮 Agent：`{"message":"...", "session_id":"..."}`（session_id 可选） |
+| `POST /api/bit/tool/:name` | 直调 BIT 工具（绕过 AI 决策，调试工具层） |
+
+控制动作自动入库，打 `bit` + `bit:chat` / `bit:tool` 标签，在「请求」页可查。
+若 BIT 的 provider 指向 ADB（base_url 填 ADB），一轮对话的完整上游流量也会同时被记录——
+「BIT 联动 + 转发记录」组合即可看到 BIT 内部决策与外部流量两份证据。
+
+**安全**：BIT Client Key 与访问密码只存本机 SQLite；`GET /api/config` 只返回
+`bit_key_hint`（前 6 位 + 长度），完整凭据不回传面板、不随记录入库。
+错误凭据 / 缺密码时 BIT 的 401 原样透传，BIT 不可达返回 502。
 
 ## 接入（三选一）
 
@@ -203,7 +241,8 @@ sqlite3 data/adb.db "SELECT session_id, COUNT(*) n FROM requests WHERE session_i
 | `usage` | token 用量（含缓存 token，SSE 从流内 usage 提取） |
 | `error` | 转发/上游错误信息 |
 
-另有一张 `config` 表（key-value）存默认目标、预设列表、注入指令、虚拟 MCP 工具——即面板「设置」与「虚拟」页的数据。
+另有一张 `config` 表（key-value）存默认目标、预设列表、注入指令、虚拟 MCP 工具、
+BIT 联动配置（`bit_url` / `bit_key` / `bit_pwd`，仅本机使用）——即面板「设置」「虚拟」「BIT」页的数据。
 
 ### 环境变量
 
@@ -227,6 +266,10 @@ sqlite3 data/adb.db "SELECT session_id, COUNT(*) n FROM requests WHERE session_i
 | `POST /api/pending/:id/respond` | 应答挂起中的请求 |
 | `POST /mcp` | 虚拟 MCP 服务器（Streamable HTTP / JSON-RPC 2.0） |
 | `POST /mock/*` | 虚拟 E2E 场景端点 |
+| `GET /api/bit/state` | BIT 联动：运行快照（版本 / Provider / 工具 / 会话计数） |
+| `GET /api/bit/tools` · `GET /api/bit/mcp` | BIT 联动：工具注册表 / MCP 服务器 |
+| `GET /api/bit/sessions` · `GET /api/bit/sessions/:id` · `GET /api/bit/audit` | BIT 联动：会话列表 / 会话详情 / 审计日志 |
+| `POST /api/bit/chat` · `POST /api/bit/tool/:name` | BIT 联动：驱动 BIT Agent 一轮对话 / 直调工具 |
 | `GET /api/export` | 全量导出 NDJSON |
 | `GET /api/config` · `POST /api/config` | 读取/设置默认目标、预设列表、注入指令、虚拟 MCP 工具 |
 | `POST /api/records/clear` | 清空记录 |
@@ -234,17 +277,28 @@ sqlite3 data/adb.db "SELECT session_id, COUNT(*) n FROM requests WHERE session_i
 
 ## 测试
 
-内置确定性假上游（JSON/SSE/慢流/中断/大响应等场景）+ 93 项 E2E 断言：
-
 ```bash
-npm run e2e
+npm test        # 单元测试 36 项 + E2E 116 项
+npm run unit    # 仅单元测试
+npm run e2e     # 仅 E2E
 ```
+
+**单元测试（`test/unit.js`，36 项）**：BIT 联动边界——`call()` 的协议白名单（ftp/file/javascript 拒绝）、
+缺失主机名、残缺地址一律 4xx/5xx 不抛异常、双凭据头、POST content-length 与多字节 body、
+超时/不可达 502、非 JSON 响应 raw 回退；`handle()` 的会话/工具 id 白名单字符（路径穿越阻断）、
+POST-only 路由、chat 校验失败不入库、未知工具 error 入库；对话分析——`classify.js` 的
+model/messages/session_id 提取（含 conversation_id 变体）、嵌套 tool_calls 与 legacy function_call、
+多模态 content 数组、SSE 流内 usage 提取、多字节逐字节跨块计数；凭据脱敏——完整 Key/密码
+绝不出现在 `GET /api/config`，中文按字符计数。
+
+**E2E（116 项）**：确定性假上游 + 假 BIT（`e2e/fake-bit.js`，模拟 BIT 双重认证与调试接口）。
 
 覆盖：三种目标解析、请求头透传与 accept-encoding 强制 identity、SSE 字节级一致性、
 多字节跨块完整性、事件精确计数、客户端中断/上游中断、20MB 响应与 5MB 请求全量入库、
 会话分组、统计与导出、SQLite 重启持久化、300 并发混合压力（并发 50）、10 路 2000 事件并发长流、
 系统指令注入；虚拟调试全链路（虚拟 MCP 握手/工具/人工应答、人工扮演 AI 整包/流式/错误/raw/断开、
-8 个 mock 场景与入库）。
+8 个 mock 场景与入库）；BIT 联动全链路（state/tools/mcp/sessions/audit 代理、chat 驱动与工具直调
+及入库标签、Client Key 脱敏、错 Key / 缺密码 401 透传、不可达 502、配置合法性校验）。
 
 仅用 Node.js 内置模块，无需安装任何依赖。
 
@@ -254,6 +308,7 @@ ADB 是纯本机工具，设计目标是"你的数据不出你的机器"：
 
 - **存储**：所有记录写入本地 SQLite（默认 `data/adb.db`，WAL 模式）。只有你主动 `GET /api/export` 或拷贝 db 文件，数据才会离开机器。
 - **密钥保护**：请求头里的 `authorization` 等凭据会随请求原样转发给上游（否则无法工作），但入库时**只保留脱敏提示** `api_key_hint`（如 `sk-abc…` 前 6 位 + 长度），完整密钥不落盘。ADB 面板与 API 都拿不到完整密钥。
+- **BIT 凭据**：面板「BIT」页保存的 BIT Client Key 与访问密码是 ADB 唯一落盘的凭据（存在本机 config 表，用于代理请求时认证）；`GET /api/config` 只返回脱敏提示，控制动作入库也不含凭据。
 - **不共享**：无遥测、无崩溃上报、无账号体系；ADB 不会向你未配置的上游之外的任何地址发数据（唯一外联是你自己填的转发目标与 `dns` 解析）。
 - **安全边界**：ADB 默认监听 `127.0.0.1`，仅本机可访问；不要把 8987 端口暴露到公网（面板可清空/导出全部记录，且转发无认证）。如需远程使用，请前置带认证的反向代理。
 
@@ -269,8 +324,10 @@ lib/db.js            SQLite：schema、记录读写、配置（预设/注入/虚
 lib/virtual.js       人工应答基础设施：挂起队列（超时兜底/断开回调）
 lib/vmcp.js          虚拟 MCP 服务器（JSON-RPC 2.0）
 lib/mockai.js        虚拟 E2E 场景端点（/mock/*）
+lib/bit.js           BIT 联动：代理控制与观测 BIT（/api/bit/*）
 lib/ui.js            面板（单文件 HTML/JS/CSS，黑白药丸风格）
-e2e/run.js           E2E：93 项断言（含假上游 e2e/fake-upstream.js）
+e2e/run.js           E2E：116 项断言（假上游 e2e/fake-upstream.js + 假 BIT e2e/fake-bit.js）
+test/unit.js         单元测试：36 项（bit.js 边界 / classify.js 对话分析 / db.js 凭据脱敏）
 ```
 
 常见改动入口：
