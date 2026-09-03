@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+
+# runtime data（SQLite 库、旧版 JSONL、日志）
+data/
+records/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# system / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
