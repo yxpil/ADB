@@ -1,6 +1,6 @@
 {
   "name": "adb-agent-debug-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ADB — Agent Debug Bridge. Zero-dependency AI API debugging proxy: forward, fully record (SQLite), SSE-safe, session analytics.",
   "main": "server.js",
   "scripts": {

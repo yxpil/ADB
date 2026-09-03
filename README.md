@@ -11,6 +11,9 @@
 - 会话分析：按 session_id 分组统计 token 用量、错误数、SSE 流数；统计按模型 / 目标 / 工具 / 日期聚合
 - 零依赖：仅用 Node.js 内置模块（含 `node:sqlite`），无需 npm install
 
+> **与 BIT 配合使用**：BIT 侧怎么填、请求怎么发、API 规范与数据隐私的图文说明，见 BIT 开发者文档
+> **[osbt.space/docs](https://osbt.space/docs)**（本文档与其互相引用：BIT 文档的「ADB 调试桥」章节即指向本 Wiki）。
+
 ## 环境要求
 
 - Node.js **>= 22.5.0**（需要内置 `node:sqlite`）
@@ -18,12 +21,22 @@
 ## 启动
 
 ```bash
-node server.js              # 默认监听 8987
+node server.js              # 默认监听 8987（仅绑定 127.0.0.1）
 PORT=9000 node server.js    # 自定义端口
 ADB_DB=./my.db node server.js   # 自定义 SQLite 路径（默认 data/adb.db，WAL 模式）
 ```
 
 打开面板：http://127.0.0.1:8987
+
+### 面板导览
+
+| 页签 | 内容 |
+|---|---|
+| **请求** | 全部记录流水：分类标签过滤、关键词/会话/状态筛选，点开单条查看完整请求头/响应头/请求体/响应体（SSE 存完整 transcript） |
+| **会话** | 按 session_id 分组：笔数、token 用量、错误数、SSE 流数，快速定位一轮完整对话 |
+| **统计** | 总量/错误率/耗时/token 聚合，按模型 / 目标 / 工具 / 日期分组 |
+| **虚拟** | 调试 BIT 专属：待应答队列（人工扮演 AI / 人工应答 MCP 工具）、虚拟 MCP 自定义工具编辑、BIT 接入指引 |
+| **设置** | 默认转发目标、预设名列表、AI 主动发消息（注入系统指令）开关与文本、清空记录 |
 
 ## 调试 BIT（三种玩法）
 
@@ -157,6 +170,51 @@ system 指令（默认「你现在可以主动发送一条信息」，文本可�
 每条记录还提取：model、session_id、api_key_hint（脱敏）、usage（token 用量，SSE 从流内提取）、
 SSE 事件数与流时长、请求/响应头与完整请求/响应体。
 
+## 数据存储
+
+全部数据在**一个 SQLite 文件**里，没有别的落盘位置：
+
+- 默认路径 `data/adb.db`（相对启动目录），`ADB_DB` 环境变量可改
+- WAL 模式：同目录会生成 `adb.db-wal` / `adb.db-shm` 临时文件，属正常现象，拷贝备份时连同主文件一起拷或先停进程
+- 面板「设置」或 `POST /api/records/clear` 清空；`GET /api/export` 导出 NDJSON
+
+直接用 sqlite3 查（记录表 `requests`）：
+
+```bash
+sqlite3 data/adb.db "SELECT id, ts, method, path, status, duration_ms FROM requests ORDER BY id DESC LIMIT 20;"
+sqlite3 data/adb.db "SELECT session_id, COUNT(*) n FROM requests WHERE session_id IS NOT NULL GROUP BY session_id ORDER BY n DESC LIMIT 10;"
+```
+
+### 记录字段（requests 表）
+
+| 字段 | 说明 |
+|---|---|
+| `ts` / `method` / `path` / `target` | 时间、HTTP 方法、路径、解析出的转发目标 |
+| `status` / `duration_ms` | 上游状态码与总耗时 |
+| `req_size` / `res_size` | 请求/响应字节数（全量不截断） |
+| `is_sse` / `sse_events` / `sse_ms` | 是否 SSE、精确事件数、流时长 |
+| `aborted` | 客户端或上游中断标记 |
+| `model` / `provider` / `session_id` | 模型名、目标/预设、会话分组 ID |
+| `api_key_hint` | 脱敏提示（前 6 位 + 长度）；**完整密钥不落盘** |
+| `preview` | 请求体摘要（列表页展示） |
+| `req_headers` / `res_headers` | 完整请求/响应头（JSON） |
+| `req_body` / `res_body` | 完整请求/响应体；SSE 存逐事件 transcript |
+| `tags` / `tools` / `tool_calls` | 自动分类标签、涉及工具名、工具调用明细（JSON） |
+| `usage` | token 用量（含缓存 token，SSE 从流内 usage 提取） |
+| `error` | 转发/上游错误信息 |
+
+另有一张 `config` 表（key-value）存默认目标、预设列表、注入指令、虚拟 MCP 工具——即面板「设置」与「虚拟」页的数据。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PORT` | `8987` | 监听端口（固定绑定 127.0.0.1） |
+| `ADB_DB` | `data/adb.db` | SQLite 文件路径 |
+| `ADB_DEFAULT_TARGET` | （空） | 启动时默认转发目标（面板设置可覆盖） |
+| `ADB_VIRTUAL_TIMEOUT` | `300000` | 待应答挂起超时（毫秒，默认 5 分钟） |
+| `ADB_INSTANCE_TOKEN` | （空） | `/api/health` 回显的实例令牌，E2E 用来防「测试打到旧实例」 |
+
 ## API
 
 | 端点 | 说明 |
@@ -223,6 +281,17 @@ e2e/run.js           E2E：93 项断言（含假上游 e2e/fake-upstream.js）
 - **改记录字段**：先改 `lib/db.js` 的建表与 `insertRequest`，再同步 `forward.js` / `server.js`（recordVirtualRpc）与 `mockai.js` 三处组装点。
 
 约定：安全相关行为（api_key_hint 脱敏、aborted 标记、超时兜底）改动必须带 E2E 断言；E2E 跑三连轮再提交。
+
+## 常见问题（FAQ）
+
+| 现象 | 原因与处理 |
+|---|---|
+| 启动报 `EADDRINUSE` | 8987 被占（多为上次遗留实例）：`lsof -iTCP:8987 -sTCP:LISTEN` 找到 PID 后 kill，或换 `PORT` |
+| 报 `node:sqlite` 不存在 | Node 版本过低，需 >= 22.5.0：`node -v` 确认 |
+| 面板能打开，转发 404 / 连不上 | 目标没解析对：检查 `x-adb-target` 的 URL/预设名；路径前缀方式无端口默认 https、显式非 443 端口走 http；或直接在面板「设置」配默认目标 |
+| 其他设备访问不了面板/转发 | ADB 固定绑定 127.0.0.1（面板可清空导出记录且转发无认证，不暴露局域网）。远程使用请前置带认证的反向代理 |
+| 备份/迁移 | 拷贝 `adb.db`（最好连 `-wal`/`-shm` 一起，或先停进程）；或 `GET /api/export` 导出 NDJSON |
+| 记录太多想清空 | 面板「设置」→ 清空记录，或 `POST /api/records/clear` |
 
 ## License
 

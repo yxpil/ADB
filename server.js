@@ -162,7 +162,8 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
+// 仅绑定回环地址：面板可清空/导出记录且转发无认证，不能默认暴露到局域网/公网
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`ADB — Agent Debug Bridge ${VERSION}`);
   console.log(`  面板:   http://127.0.0.1:${PORT}`);
   console.log(`  转发:   x-adb-target: <url|预设名>  /  /forward/<host>/...  /  面板设置默认目标`);
