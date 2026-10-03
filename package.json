@@ -7,7 +7,8 @@
     "start": "node server.js",
     "unit": "node test/unit.js",
     "e2e": "node e2e/run.js",
-    "test": "npm run unit && npm run e2e"
+    "test:audit": "node --test --test-force-exit tests/",
+    "test": "npm run unit && npm run e2e && npm run test:audit"
   },
   "bin": {
     "adb": "server.js"
