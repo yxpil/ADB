@@ -1,4 +1,10 @@
 # ADB 测试说明
+- 测试完成：是（2026-10-04）
+- 测试日期：2026-10-04
+- 测试内容：单元测试覆盖 lib/bit.js（call/handle 路由边界）、lib/classify.js（analyzeRequest/analyzeResponseJson/sseCounter）、lib/db.js（凭据脱敏/参数化查询）；注入测试覆盖路径穿越、XSS、伪协议、SQL注入、SSE流注入；钩子测试覆盖回调参数传递、错误隔离、事件顺序；集成测试覆盖 db+classify+bit 端到端协作
+- 运行命令：npm test
+- 测试框架：node:test（Node.js 内置测试运行器）
+- 模型：豆包（Doubao）生成
 
 ## 测试目录结构
 
