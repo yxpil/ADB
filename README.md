@@ -353,3 +353,15 @@ test/unit.js         单元测试：36 项（bit.js 边界 / classify.js 对话�
 ## License
 
 Apache-2.0
+
+---
+
+<div align="center">
+
+<a href="https://github.com/yxpil/ADB">
+  <img width="100%" src="https://alittlecatgirlpanel.yxp.hk/card?repo=yxpil/ADB" alt="gh-card · yxpil/ADB" />
+</a>
+
+<sub>Powered by <a href="https://alittlecatgirlpanel.yxp.hk"><b>gh-card</b></a> · 粉色手写体 README 仓库名片</sub>
+
+</div>
